@@ -230,19 +230,25 @@ if fatsecret_client_id and fatsecret_client_secret:
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700;800;900&display=swap');
-.block-container {padding-top:1.2rem; max-width:1400px;}
+.block-container {padding-top:2rem !important; max-width:1400px;}
 [data-testid="stAppViewContainer"] {background:#fbfaf7;}
 [data-testid="stSidebar"] {background:#f0f3eb;}
-.brand {font-family:'Nunito Sans',sans-serif;font-weight:900;letter-spacing:-2px;color:#087f45;font-size:3rem;line-height:1.0;}
-.brand span {color:#202820;font-weight:700;font-size:1.45rem;letter-spacing:-.5px;}
-.tagline {color:#647064;font-size:.95rem;margin-top:.35rem;margin-bottom:1.2rem;}
+.brand-wrap {width:100%; box-sizing:border-box; padding:0.25rem 0 0.15rem; margin:0 0 0.25rem; overflow:visible;}
+.brand {font-family:'Nunito Sans',sans-serif;font-weight:900;letter-spacing:-1.8px;color:#087f45;font-size:clamp(2.1rem, 5vw, 3.5rem);line-height:1.12; white-space:normal; overflow-wrap:anywhere; margin:0;}
+.brand span {display:inline-block; color:#202820;font-weight:800;font-size:clamp(1.2rem, 2.8vw, 1.7rem);letter-spacing:-.5px; white-space:nowrap; vertical-align:baseline; margin-left:.12em;}
+.tagline {color:#647064;font-size:1rem;line-height:1.4;margin-top:.45rem;margin-bottom:1.2rem;}
 div[data-testid="stMetric"] {background:#fff;border:1px solid #e7e9e2;padding:14px 16px;border-radius:14px;}
 .stTabs [data-baseweb="tab-list"] {gap:8px;}
 .stTabs [data-baseweb="tab"] {border-radius:10px 10px 0 0;padding:10px 14px;background:#f0f3eb;}
 div.stButton > button {border-radius:12px;}
+@media (max-width: 600px) {
+  .block-container {padding-top:1.4rem !important;}
+  .brand {letter-spacing:-1px; font-size:2.1rem;}
+  .brand span {font-size:1.15rem; display:block; margin-left:0; margin-top:.1rem;}
+}
 </style>
 """, unsafe_allow_html=True)
-st.markdown('<div class="brand">AnviEats <span>(...less)</span></div><div class="tagline">Eat well. Log less. Feel good.</div>', unsafe_allow_html=True)
+st.markdown('<div class="brand-wrap"><div class="brand">AnviEats <span>(...less)</span></div></div><div class="tagline">Eat well. Log less. Feel good.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("Your plan")
