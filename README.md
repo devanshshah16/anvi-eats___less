@@ -1,40 +1,54 @@
-# Anvi Diet & Weight Tracker
+# AnviEats (...less)
 
-A Streamlit starter app for food logging, weight tracking, a recipe library, and historical exports.
+Streamlit diet and weight tracker with natural-language food logging, optional microphone dictation, FatSecret Platform API nutrition search, a meal library, weight charts, and an estimated time-to-goal projection.
 
 ## Files
-- `app.py` — Streamlit app and SQLite persistence.
-- `meals.csv` — editable starter meal/recipe library. Includes some meals and macro values transcribed from Anvi's 25-Apr-2024 diet guide and the pattice recipe PDF, plus clearly labelled rough-estimate recipe ideas.
+- `app.py` — application and SQLite persistence.
+- `meals.csv` — starter meal/recipe library.
 - `requirements.txt` — Python dependencies.
-- `funvi_diet.db` — created automatically on first run; stores profile, weight logs and food logs. Back it up regularly.
+- `funvi_diet.db` — created automatically when the app first runs; stores logs locally.
 
-## Run locally
-1. Install Python 3.10+.
-2. Unzip this folder to a location you can find.
-3. Open Terminal (Mac) or Command Prompt/PowerShell (Windows) and change directory into this folder.
-4. Create and activate a virtual environment (recommended):
-   - Mac/Linux: `python3 -m venv .venv` then `source .venv/bin/activate`
+## Important credential security note
+The FatSecret Client Secret was shown in a screenshot in a chat. Treat it as exposed and **regenerate/rotate the Client Secret in your FatSecret developer dashboard before using it**. Do not put API credentials directly in `app.py`, commit them to GitHub, or share them in screenshots. The app code intentionally does not contain your actual credentials.
+
+## Setup locally
+1. Use Python 3.11 or 3.12.
+2. Open a terminal in this folder.
+3. Create and activate a virtual environment (recommended):
+   - macOS/Linux: `python3 -m venv .venv` then `source .venv/bin/activate`
    - Windows: `py -m venv .venv` then `.venv\\Scripts\\activate`
-5. Install dependencies: `pip install -r requirements.txt`
-6. Start the app: `streamlit run app.py`
-7. A browser tab should open. The app runs locally; keep the terminal window open while using it.
+4. Install packages: `pip install -r requirements.txt`
+5. Create a folder named `.streamlit` in this project folder.
+6. Inside it, create `.streamlit/secrets.toml` containing:
+   ```toml
+   FATSECRET_CLIENT_ID = "your-new-client-id"
+   FATSECRET_CLIENT_SECRET = "your-new-client-secret"
+   ```
+7. In FatSecret developer settings, check whether your account requires IP allowlisting and add the public IP address from which the app will call the API. Their OAuth 2.0 docs state that API token requests are restricted to configured IPs.
+8. Run: `streamlit run app.py`
 
-## How the calorie estimate works
-The app estimates BMR with the Mifflin–St Jeor equation for women, multiplies by an activity factor to estimate TDEE, then subtracts a selected 250, 350 or 500 kcal/day deficit (or zero for maintenance). The app has a 1,200 kcal/day lower guardrail, but this is not a medical recommendation and 1,200 kcal is not necessarily appropriate for an individual. Current weight comes from the most recently recorded weigh-in. It is an estimate, not a prescription.
+For Streamlit Community Cloud, add `FATSECRET_CLIENT_ID` and `FATSECRET_CLIENT_SECRET` in the app's **Settings → Secrets** rather than uploading a local secrets file. Depending on FatSecret key restrictions, the cloud app's outbound IP may be a deployment issue; test it and check the FatSecret developer console.
 
-**Important:** the older PDFs contain historical clinician/dietitian plans with different dates and targets. The app does not automatically treat their old target weights or calorie totals as current instructions. One historical report shows a very low daily calorie figure; do not reuse that figure as a new target without confirmation from a qualified clinician/dietitian. For PCOS, high cholesterol, medication, pregnancy/breastfeeding, symptoms, or any medically supervised plan, have the target and nutrition approach reviewed by her clinician/dietitian.
+## Food logging
+Enter one food item per line, for example:
+- `100 g paneer`
+- `2 chapatis`
+- `1 cup cooked rice`
+- `1 tsp ghee`
 
-## Logging and data
-- Data is stored in `funvi_diet.db` on the machine running Streamlit.
-- Logs persist when the app is restarted on that machine.
-- It does not sync between devices automatically. To use on a phone and laptop, deploy with a durable database/storage layer and authentication. Do not assume the local filesystem on a free cloud host is permanent.
-- Use the History tab to export food and weight logs as CSV. Keep backups of the database and CSV exports.
-- `meals.csv` can be edited in Excel/Google Sheets. Nutrition values are estimates and depend on ingredients, brands, preparation, and portions.
+The app searches FatSecret, retrieves serving-level nutrition, normalizes the selected record to a per-100-g estimate, and calculates calories/macros for the entered quantity. It currently uses the first search match automatically and shows alternatives for review. Please check the match before saving. Grams are more accurate than household measures; generic conversions for cups, pieces, spoons, chapatis and other units can be wrong for a specific food.
 
-## Suggested next improvements
-- Add password/login and per-user data isolation before sharing online.
-- Add a weekly average weight chart, fibre and micronutrient tracking, recipe serving-size calculator, meal planner, reminders, and database backups.
-- For more accurate nutrition, calculate recipes from weighed ingredients using a trusted nutrition database or package labels, then update `meals.csv`.
+Voice dictation uses `streamlit-mic-recorder` and browser microphone support. Review the transcript before calculating. If no quantity is spoken, the app assumes a generic serving and flags the portion as estimated.
 
-## Privacy
-This app is a prototype and has no login or encryption layer. Do not deploy it publicly with identifiable health information until authentication, access controls, secure hosting and backup are added.
+## API
+FatSecret uses OAuth 2.0 client-credentials authentication. The app requests an access token from `https://oauth.fatsecret.com/connect/token` and calls the platform REST endpoint for `foods.search` and `food.get.v5`.
+- Official guide: https://platform.fatsecret.com/docs/guides/authentication/oauth2
+- API overview: https://platform.fatsecret.com/docs/guides
+
+Whether particular food fields/methods are available depends on the FatSecret account plan and API permissions. Some errors may indicate scope/plan access or IP restriction problems.
+
+## Goal estimate and medical caution
+The app estimates BMR with Mifflin–St Jeor, multiplies by an activity factor, and applies the selected calorie adjustment. The time-to-goal is a rough projection capped at 0.5 kg/week; actual weight change is nonlinear. It is not a medical recommendation or deadline. Historical reports are not automatically treated as current instructions. Confirm targets with a qualified clinician/dietitian, especially if following a medically supervised plan.
+
+## Data and privacy
+Logs persist in `funvi_diet.db` on the computer/server running Streamlit but do not automatically sync across devices. This prototype has no login or encryption. Before public deployment, add authentication, access controls, secure hosting, persistent storage and backups. Keep the database private.
