@@ -1,4 +1,4 @@
-# Funvi Diet & Weight Tracker
+# Anvi Diet & Weight Tracker
 
 A Streamlit starter app for food logging, weight tracking, a recipe library, and historical exports.
 
