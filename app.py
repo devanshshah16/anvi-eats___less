@@ -148,6 +148,62 @@ def nutrition_for_query(query, token):
         "source_serving": serving,
     }, foods
 
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def search_fatsecret_matches(query, token):
+    """Cached live search results for the food selector."""
+    payload = fatsecret_call(token, "foods.search", search_expression=query, max_results=8)
+    block = payload.get("foods", {})
+    foods = block.get("food", []) if isinstance(block, dict) else []
+    if isinstance(foods, dict):
+        foods = [foods]
+    matches = []
+    for item in foods:
+        if item.get("food_id") and item.get("food_name"):
+            label = item.get("food_name", "")
+            brand = item.get("brand_name", "")
+            if brand:
+                label += f" ({brand})"
+            matches.append({"food_id": str(item["food_id"]), "label": label, "food_name": item.get("food_name", ""), "brand": brand})
+    return matches
+
+
+def nutrition_for_food_id(food_id, token):
+    """Fetch detailed nutrition for the exact food selected by the user."""
+    payload = fatsecret_call(token, "food.get.v5", food_id=str(food_id))
+    detail = payload.get("food", {})
+    servings_block = detail.get("servings", {})
+    servings = servings_block.get("serving", []) if isinstance(servings_block, dict) else []
+    if isinstance(servings, dict):
+        servings = [servings]
+    usable = []
+    for serving in servings:
+        try:
+            amount = float(serving.get("metric_serving_amount", 0) or 0)
+            kcal = float(serving.get("calories", 0) or 0)
+            if amount > 0 and kcal >= 0:
+                usable.append(serving)
+        except (TypeError, ValueError):
+            continue
+    if not usable:
+        raise LookupError("FatSecret did not return usable serving nutrition for this match.")
+    serving = min(usable, key=lambda x: abs(float(x.get("metric_serving_amount", 0) or 0) - 100))
+    base_grams = float(serving.get("metric_serving_amount", 100) or 100)
+    factor = 100.0 / base_grams
+    return {
+        "food_id": str(food_id),
+        "description": detail.get("food_name", "Selected food"),
+        "brand": detail.get("brand_name", ""),
+        "nutrients_100g": {
+            "calories": float(serving.get("calories", 0) or 0) * factor,
+            "protein": float(serving.get("protein", 0) or 0) * factor,
+            "carbs": float(serving.get("carbohydrate", 0) or 0) * factor,
+            "fat": float(serving.get("fat", 0) or 0) * factor,
+        },
+        "source_serving": serving,
+    }
+
 def nutrient_value(food, key):
     return float(food["nutrients_100g"].get(key, 0) or 0)
 
@@ -363,86 +419,177 @@ with tabs[0]:
 # ---------- Quick log ----------
 with tabs[1]:
     st.subheader("Quick log")
-    st.write("Type ingredients and quantities in plain language, one per line, or use voice input. Check the matched foods and estimates before saving.")
+    st.write("Search each food, choose the exact FatSecret match from the dropdown, and enter the amount in grams. Search results update as you type.")
     if not fatsecret_token:
         st.warning("Nutrition lookup is not configured yet. Add your FatSecret Client ID and Client Secret in `.streamlit/secrets.toml`; setup instructions are in README.md.")
         if fatsecret_error:
             st.error(f"FatSecret authentication error: {fatsecret_error}")
+
     log_date = st.date_input("When did you eat it?", value=date.today(), key="quick_log_date")
-    log_time = st.time_input("Time", value=datetime.now().time().replace(second=0,microsecond=0), key="quick_log_time")
-    meal_type = st.selectbox("Meal", ["Breakfast","Mid-morning snack","Lunch","Afternoon snack","Dinner","Drink","Other"], key="quick_meal_type")
-    st.markdown("#### What did you have?")
-    typed = st.text_area("Food and quantity", placeholder="Examples:\n100 g paneer\n2 chapatis\n1 cup cooked rice\n1 tsp ghee", height=130, label_visibility="collapsed", key="typed_food")
-    st.caption("Tip: quantities in grams are most accurate. Household measures and pieces are estimated because a chapati, cup or serving can vary.")
+    log_time = st.time_input("Time", value=datetime.now().time().replace(second=0, microsecond=0), key="quick_log_time")
+    meal_type = st.selectbox("Meal", ["Breakfast", "Mid-morning snack", "Lunch", "Afternoon snack", "Dinner", "Drink", "Other"], key="quick_meal_type")
+
+    # Voice input remains optional: transcript can be used to seed food search terms.
     try:
         from streamlit_mic_recorder import speech_to_text
         spoken = speech_to_text(language="en", start_prompt="🎙️ Speak your meal", stop_prompt="⏹️ Stop", just_once=True, use_container_width=True, key="anvi_speech")
         if spoken:
             st.session_state["voice_food_text"] = spoken
-            st.info("Voice captured. Review and edit the cleaned-up text below before calculating.")
+            st.info("Voice captured. You can copy individual food names into the rows below and choose the correct database match.")
     except Exception:
-        st.caption("Voice input requires browser speech recognition. If the microphone button isn't available, use the text box or update streamlit-mic-recorder.")
-    if st.session_state.get("voice_food_text"):
-        voice_text = st.text_area("Voice transcript (editable)", value=st.session_state["voice_food_text"], height=90, key="voice_edit")
-        st.caption("If the food box above is empty, the edited voice transcript will be used when you calculate.")
-        st.session_state["voice_food_text"] = voice_text
-    voice_input = st.session_state.get("voice_food_text", "")
-    effective_text = typed.strip() or voice_input.strip()
-    if voice_input and not typed.strip():
-        st.info("Your voice transcript will be used for the calculation. You can edit it in the transcript box above first.")
-    calculate = st.button("Calculate calories", type="primary", use_container_width=True, disabled=not bool(effective_text))
+        st.caption("Voice input is optional. You can type food names directly below.")
+
+    if "food_row_count" not in st.session_state:
+        st.session_state["food_row_count"] = 3
+    if "food_rows_data" not in st.session_state:
+        st.session_state["food_rows_data"] = {}
+
+    st.markdown("#### Food items")
+    st.caption("Enter a food name, select the closest match from FatSecret, then enter the amount. Grams give the most consistent estimates.")
+    rows = []
+    for i in range(st.session_state["food_row_count"]):
+        st.markdown(f"**Food {i + 1}**")
+        c_food, c_amount = st.columns([3, 1])
+        state = st.session_state["food_rows_data"].get(i, {})
+        query = c_food.text_input(
+            "Food item",
+            value=state.get("query", ""),
+            placeholder="e.g., cooked green peas",
+            key=f"food_query_{i}",
+        )
+        amount = c_amount.number_input(
+            "Amount (g)",
+            min_value=0.0,
+            max_value=10000.0,
+            value=float(state.get("amount", 100.0)),
+            step=10.0,
+            key=f"food_amount_{i}",
+        )
+        selected_id = None
+        selected_label = ""
+        matches = []
+        if fatsecret_token and query.strip() and len(query.strip()) >= 2:
+            try:
+                matches = search_fatsecret_matches(query.strip(), fatsecret_token)
+                if matches:
+                    options = [m["food_id"] for m in matches]
+                    labels = {m["food_id"]: m["label"] for m in matches}
+                    previous = state.get("selected_id")
+                    default_index = options.index(previous) if previous in options else 0
+                    selected_id = c_food.selectbox(
+                        "Choose FatSecret match",
+                        options=options,
+                        index=default_index,
+                        format_func=lambda x, labels=labels: labels.get(x, x),
+                        key=f"food_match_{i}",
+                    )
+                    selected_label = labels.get(selected_id, "")
+                else:
+                    c_food.caption("No matches found. Try a shorter or more specific food name.")
+            except Exception as exc:
+                c_food.warning(f"Food search failed: {exc}")
+        elif query.strip():
+            c_food.caption("Enter at least 2 characters to search." if len(query.strip()) < 2 else "Add FatSecret credentials to search.")
+        st.session_state["food_rows_data"][i] = {
+            "query": query, "amount": amount, "selected_id": selected_id, "selected_label": selected_label
+        }
+        rows.append({"index": i, "query": query.strip(), "amount": amount, "food_id": selected_id, "label": selected_label})
+        st.divider()
+
+    add_col, remove_col = st.columns(2)
+    if add_col.button("＋ Add another food", use_container_width=True):
+        st.session_state["food_row_count"] = min(20, st.session_state["food_row_count"] + 1)
+        st.rerun()
+    if remove_col.button("− Remove last row", use_container_width=True, disabled=st.session_state["food_row_count"] <= 1):
+        last = st.session_state["food_row_count"] - 1
+        st.session_state["food_row_count"] = max(1, last)
+        st.session_state["food_rows_data"].pop(last, None)
+        st.rerun()
+
+    calculate = st.button(
+        "Calculate calories",
+        type="primary",
+        use_container_width=True,
+        disabled=not bool(fatsecret_token) or not any(r["food_id"] and r["amount"] > 0 for r in rows),
+    )
     if calculate:
-        if not fatsecret_token:
-            st.error("FatSecret credentials required. See the setup note in the sidebar and README.")
-        else:
-            with st.spinner("Looking up foods and calculating nutrition…"):
-                results, errors = calculate_text_food(effective_text, fatsecret_token)
-            st.session_state["nutrition_results"] = results
-            st.session_state["nutrition_errors"] = errors
-            st.session_state["nutrition_source_text"] = effective_text
+        results, errors = [], []
+        with st.spinner("Retrieving nutrition for selected foods…"):
+            for row in rows:
+                if not row["query"].strip():
+                    continue
+                if not row["food_id"]:
+                    errors.append(f"{row['query']}: choose a food from the FatSecret match dropdown.")
+                    continue
+                if row["amount"] <= 0:
+                    errors.append(f"{row['query']}: enter an amount greater than zero.")
+                    continue
+                try:
+                    food = nutrition_for_food_id(row["food_id"], fatsecret_token)
+                    nutrients = food["nutrients_100g"]
+                    grams = float(row["amount"])
+                    results.append({
+                        "input": f"{grams:g} g {row['query']}",
+                        "quantity": grams,
+                        "unit": "g",
+                        "grams_est": grams,
+                        "food": food["description"],
+                        "fdc_id": food["food_id"],
+                        "calories": nutrients["calories"] * grams / 100,
+                        "protein": nutrients["protein"] * grams / 100,
+                        "carbs": nutrients["carbs"] * grams / 100,
+                        "fat": nutrients["fat"] * grams / 100,
+                        "assumed": False,
+                        "basis": f"{food['description']} · {grams:.0f} g",
+                        "alternatives": [m["label"] for m in search_fatsecret_matches(row["query"], fatsecret_token)[:8]],
+                        "source_serving": food["source_serving"],
+                    })
+                except Exception as exc:
+                    errors.append(f"{row['query']}: {exc}")
+        st.session_state["nutrition_results"] = results
+        st.session_state["nutrition_errors"] = errors
+
     results = st.session_state.get("nutrition_results", [])
     errors = st.session_state.get("nutrition_errors", [])
     if results:
+        st.markdown("#### Nutrition estimate")
         result_df = pd.DataFrame(results)
-        view = result_df[["input","food","grams_est","calories","protein","carbs","fat","assumed"]].copy()
-        view.columns = ["You entered","FatSecret food match","Estimated grams","kcal","Protein g","Carbs g","Fat g","Portion estimated?"]
-        for col in ["kcal","Protein g","Carbs g","Fat g"]:
+        view = result_df[["input", "food", "grams_est", "calories", "protein", "carbs", "fat"]].copy()
+        view.columns = ["Amount entered", "Selected food match", "Amount (g)", "kcal", "Protein (g)", "Carbs (g)", "Fat (g)"]
+        for col in ["kcal", "Protein (g)", "Carbs (g)", "Fat (g)"]:
             view[col] = view[col].astype(float).round(1)
         st.dataframe(view, hide_index=True, use_container_width=True)
         total_kcal = sum(r["calories"] for r in results)
         total_pro = sum(r["protein"] for r in results)
         total_carb = sum(r["carbs"] for r in results)
         total_fat = sum(r["fat"] for r in results)
-        a,b,c,d = st.columns(4)
+        a, b, c, d = st.columns(4)
         a.metric("Meal calories", f"{total_kcal:.0f} kcal")
         b.metric("Protein", f"{total_pro:.1f} g")
         c.metric("Carbs", f"{total_carb:.1f} g")
         d.metric("Fat", f"{total_fat:.1f} g")
-        if any(r["assumed"] for r in results):
-            st.warning("Some portions use generic household estimates. For more accurate results, enter grams or verify each portion.")
         for r in results:
-            with st.expander(f"Match details: {r['input']}"):
-                st.write(f"Matched database item: **{r['food']}** (FatSecret food ID: {r['fdc_id']})")
-                st.write("Other search matches: " + " · ".join(r["alternatives"]))
+            with st.expander(f"Nutrition details: {r['input']}"):
+                st.write(f"Selected database item: **{r['food']}** (FatSecret food ID: {r['fdc_id']})")
                 serving = r.get("source_serving", {})
-                st.caption(f"Nutrition normalized from FatSecret serving: {serving.get('serving_description','')} ({serving.get('metric_serving_amount','?')} {serving.get('metric_serving_unit','')}).")
-                if r["assumed"]:
-                    st.caption("Portion conversion is approximate; for piece/cup/spoon entries, the grams estimate may not fit this particular food.")
+                st.caption(f"Nutrition normalized from FatSecret serving: {serving.get('serving_description', '')} ({serving.get('metric_serving_amount', '?')} {serving.get('metric_serving_unit', '')}).")
         if st.button("Save this meal to today's log", type="primary", use_container_width=True):
-            name = " + ".join(r["input"] for r in results)
-            notes = "FatSecret database estimates; " + ("some portions estimated." if any(r["assumed"] for r in results) else "quantities entered in weight units.")
+            name = " + ".join(f"{r['grams_est']:g} g {r['food']}" for r in results)
             with db() as conn:
-                conn.execute("""INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, notes, datetime.now().isoformat()))
+                conn.execute(
+                    """INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, "FatSecret nutrition estimate; amounts entered in grams.", datetime.now().isoformat()),
+                )
             st.session_state["nutrition_results"] = []
             st.session_state["nutrition_errors"] = []
             st.success("Meal saved.")
             st.rerun()
     if errors:
         st.warning("Some items could not be calculated:")
-        for error in errors: st.write("• " + error)
-    st.caption("Nutrition is an estimate, not exact lab measurement. Database matches and household portions can be wrong; review the match details before saving.")
+        for error in errors:
+            st.write("• " + error)
+    st.caption("Nutrition is an estimate. Review the selected food match before saving; database entries can differ by preparation and brand.")
 
 # ---------- Weight ----------
 with tabs[2]:
