@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import sqlite3
 import requests
-import os, re, math
+import os, re, math, json
 from pathlib import Path
 from datetime import date, datetime, timedelta
 
@@ -37,6 +37,11 @@ def init_db():
             meal_type TEXT, food_name TEXT NOT NULL, servings REAL NOT NULL DEFAULT 1,
             calories REAL NOT NULL, protein REAL DEFAULT 0, carbs REAL DEFAULT 0,
             fat REAL DEFAULT 0, notes TEXT DEFAULT '', created_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS saved_meals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE,
+            ingredients_json TEXT NOT NULL, calories REAL DEFAULT 0, protein REAL DEFAULT 0,
+            carbs REAL DEFAULT 0, fat REAL DEFAULT 0, created_at TEXT
         );
         """)
         if not c.execute("SELECT id FROM profile WHERE id=1").fetchone():
@@ -286,22 +291,23 @@ if fatsecret_client_id and fatsecret_client_secret:
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Nunito+Sans:wght@400;600;700;800;900&display=swap');
-.block-container {padding-top:2rem !important; max-width:1400px;}
-[data-testid="stAppViewContainer"] {background:#fbfaf7;}
-[data-testid="stSidebar"] {background:#f0f3eb;}
-.brand-wrap {width:100%; box-sizing:border-box; padding:0.25rem 0 0.15rem; margin:0 0 0.25rem; overflow:visible;}
-.brand {font-family:'Nunito Sans',sans-serif;font-weight:900;letter-spacing:-1.8px;color:#087f45;font-size:clamp(2.1rem, 5vw, 3.5rem);line-height:1.12; white-space:normal; overflow-wrap:anywhere; margin:0;}
-.brand span {display:inline-block; color:#202820;font-weight:800;font-size:clamp(1.2rem, 2.8vw, 1.7rem);letter-spacing:-.5px; white-space:nowrap; vertical-align:baseline; margin-left:.12em;}
-.tagline {color:#647064;font-size:1rem;line-height:1.4;margin-top:.45rem;margin-bottom:1.2rem;}
-div[data-testid="stMetric"] {background:#fff;border:1px solid #e7e9e2;padding:14px 16px;border-radius:14px;}
+:root { color-scheme: light; }
+[data-testid="stAppViewContainer"], [data-testid="stMain"] { background:#fff7fb !important; color:#342532 !important; }
+[data-testid="stHeader"] { background:rgba(255,247,251,.96) !important; }
+[data-testid="stSidebar"] { background:#ffe8f1 !important; }
+[data-testid="stMarkdownContainer"], [data-testid="stWidgetLabel"] p, label, p, h1, h2, h3, h4 { color:#342532; }
+.block-container {padding-top:1.5rem !important; max-width:1400px;}
+.brand-wrap {width:100%;box-sizing:border-box;padding:.25rem 0 .15rem;margin:0 0 .25rem;overflow:visible;}
+.brand {font-family:'Nunito Sans',sans-serif;font-weight:900;letter-spacing:-1.8px;color:#d63384;font-size:clamp(2.1rem,5vw,3.5rem);line-height:1.12;white-space:normal;overflow-wrap:anywhere;margin:0;}
+.brand span {display:inline-block;color:#6b4058;font-weight:800;font-size:clamp(1.2rem,2.8vw,1.7rem);letter-spacing:-.5px;white-space:nowrap;vertical-align:baseline;margin-left:.12em;}
+.tagline {color:#875b73;font-size:1rem;line-height:1.4;margin-top:.45rem;margin-bottom:1.2rem;}
+div[data-testid="stMetric"] {background:#fff;border:1px solid #f3c7dc;padding:14px 16px;border-radius:14px;}
 .stTabs [data-baseweb="tab-list"] {gap:8px;}
-.stTabs [data-baseweb="tab"] {border-radius:10px 10px 0 0;padding:10px 14px;background:#f0f3eb;}
-div.stButton > button {border-radius:12px;}
-@media (max-width: 600px) {
-  .block-container {padding-top:1.4rem !important;}
-  .brand {letter-spacing:-1px; font-size:2.1rem;}
-  .brand span {font-size:1.15rem; display:block; margin-left:0; margin-top:.1rem;}
-}
+.stTabs [data-baseweb="tab"] {border-radius:10px 10px 0 0;padding:10px 14px;background:#ffe8f1;}
+div.stButton > button, div[data-testid="stFormSubmitButton"] button {border-radius:12px;border-color:#ed9ac1;color:#8f245b;background:#fff0f7;}
+div.stButton > button[kind="primary"], div[data-testid="stFormSubmitButton"] button[kind="primary"] {background:#d63384;color:white;border-color:#d63384;}
+[data-baseweb="select"] > div, [data-testid="stTextInput"] input, [data-testid="stNumberInput"] input, textarea {background:#fff !important;color:#342532 !important;border-color:#efbfd6 !important;}
+@media (max-width:600px){.block-container{padding-top:1rem!important}.brand{letter-spacing:-1px;font-size:2.1rem}.brand span{font-size:1.15rem;display:block;margin-left:0;margin-top:.1rem}}
 </style>
 """, unsafe_allow_html=True)
 st.markdown('<div class="brand-wrap"><div class="brand">AnviEats <span>(...less)</span></div></div><div class="tagline">Eat well. Log less. Feel good.</div>', unsafe_allow_html=True)
@@ -352,12 +358,18 @@ def goal_eta_days(current, goal, profile, tdee, target):
     if kg_week <= 0: return None
     return math.ceil(abs(current-float(goal))/kg_week*7)
 
-tabs = st.tabs(["🏠 Dashboard", "🍽️ Quick log", "⚖️ Weight", "🍲 Meal library", "📈 History", "⚙️ Settings"])
+sections = ["🏠 Dashboard", "🍽️ Quick log", "⚖️ Weight", "🍲 Meal library", "📈 History", "⚙️ Settings"]
+if "nav_section" not in st.session_state:
+    st.session_state["nav_section"] = sections[0]
+st.radio("Navigate", sections, horizontal=True, key="nav_section", label_visibility="collapsed")
 
 # ---------- Dashboard ----------
-with tabs[0]:
+if st.session_state["nav_section"] == "🏠 Dashboard":
     st.subheader("Today's overview")
     st.caption(date.today().strftime("%A, %d %B %Y"))
+    quick_a, quick_b = st.columns(2)
+    quick_a.button("＋ Log a meal", type="primary", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "🍽️ Quick log"}))
+    quick_b.button("⚖️ Log current weight", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "⚖️ Weight"}))
     if target:
         remaining = target-today_cal
         a,b,c,d = st.columns(4)
@@ -417,9 +429,9 @@ with tabs[0]:
         st.dataframe(today_food[["log_time","meal_type","food_name","calories","protein","carbs","fat"]].rename(columns={"log_time":"Time","meal_type":"Meal","food_name":"Food","calories":"kcal","protein":"Protein (g)","carbs":"Carbs (g)","fat":"Fat (g)"}), hide_index=True, use_container_width=True)
 
 # ---------- Quick log ----------
-with tabs[1]:
+elif st.session_state["nav_section"] == "🍽️ Quick log":
     st.subheader("Quick log")
-    st.write("Search each food, choose the exact FatSecret match from the dropdown, and enter the amount in grams. Search results update as you type.")
+    st.write("Search each food, choose the closest FatSecret match, then select a quantity and measurement unit. Household conversions are estimates; use grams when possible.")
     if not fatsecret_token:
         st.warning("Nutrition lookup is not configured yet. Add your FatSecret Client ID and Client Secret in `.streamlit/secrets.toml`; setup instructions are in README.md.")
         if fatsecret_error:
@@ -440,7 +452,7 @@ with tabs[1]:
         st.caption("Voice input is optional. You can type food names directly below.")
 
     if "food_row_count" not in st.session_state:
-        st.session_state["food_row_count"] = 3
+        st.session_state["food_row_count"] = 1
     if "food_rows_data" not in st.session_state:
         st.session_state["food_rows_data"] = {}
 
@@ -449,7 +461,7 @@ with tabs[1]:
     rows = []
     for i in range(st.session_state["food_row_count"]):
         st.markdown(f"**Food {i + 1}**")
-        c_food, c_amount = st.columns([3, 1])
+        c_food, c_amount, c_unit = st.columns([3, 1, 1.25])
         state = st.session_state["food_rows_data"].get(i, {})
         query = c_food.text_input(
             "Food item",
@@ -458,13 +470,14 @@ with tabs[1]:
             key=f"food_query_{i}",
         )
         amount = c_amount.number_input(
-            "Amount (g)",
-            min_value=0.0,
-            max_value=10000.0,
-            value=float(state.get("amount", 100.0)),
-            step=10.0,
+            "Amount", min_value=0.0, max_value=10000.0,
+            value=float(state.get("amount", 1.0 if state.get("unit", "g") not in ("g", "ml") else 100.0)),
+            step=1.0 if state.get("unit", "g") not in ("g", "ml") else 10.0,
             key=f"food_amount_{i}",
         )
+        unit_options = ["g", "oz", "lb", "ml", "cup", "tbsp", "tsp", "piece", "serving"]
+        saved_unit = state.get("unit", "g")
+        unit = c_unit.selectbox("Measure", unit_options, index=unit_options.index(saved_unit) if saved_unit in unit_options else 0, key=f"food_unit_{i}")
         selected_id = None
         selected_label = ""
         matches = []
@@ -491,9 +504,9 @@ with tabs[1]:
         elif query.strip():
             c_food.caption("Enter at least 2 characters to search." if len(query.strip()) < 2 else "Add FatSecret credentials to search.")
         st.session_state["food_rows_data"][i] = {
-            "query": query, "amount": amount, "selected_id": selected_id, "selected_label": selected_label
+            "query": query, "amount": amount, "unit": unit, "selected_id": selected_id, "selected_label": selected_label
         }
-        rows.append({"index": i, "query": query.strip(), "amount": amount, "food_id": selected_id, "label": selected_label})
+        rows.append({"index": i, "query": query.strip(), "amount": amount, "unit": unit, "food_id": selected_id, "label": selected_label})
         st.divider()
 
     add_col, remove_col = st.columns(2)
@@ -527,11 +540,15 @@ with tabs[1]:
                 try:
                     food = nutrition_for_food_id(row["food_id"], fatsecret_token)
                     nutrients = food["nutrients_100g"]
-                    grams = float(row["amount"])
+                    qty = float(row["amount"])
+                    unit = row["unit"]
+                    # Household units are estimates; metric mass/volume units are direct approximations.
+                    grams_per_unit = {"g":1.0, "oz":28.3495, "lb":453.592, "ml":1.0, "cup":150.0, "tbsp":15.0, "tsp":5.0, "piece":100.0, "serving":150.0}
+                    grams = qty * grams_per_unit[unit]
                     results.append({
-                        "input": f"{grams:g} g {row['query']}",
-                        "quantity": grams,
-                        "unit": "g",
+                        "input": f"{qty:g} {unit} {row['query']}",
+                        "quantity": qty,
+                        "unit": unit,
                         "grams_est": grams,
                         "food": food["description"],
                         "fdc_id": food["food_id"],
@@ -555,7 +572,7 @@ with tabs[1]:
         st.markdown("#### Nutrition estimate")
         result_df = pd.DataFrame(results)
         view = result_df[["input", "food", "grams_est", "calories", "protein", "carbs", "fat"]].copy()
-        view.columns = ["Amount entered", "Selected food match", "Amount (g)", "kcal", "Protein (g)", "Carbs (g)", "Fat (g)"]
+        view.columns = ["Amount entered", "Selected food match", "Approx. grams", "kcal", "Protein (g)", "Carbs (g)", "Fat (g)"]
         for col in ["kcal", "Protein (g)", "Carbs (g)", "Fat (g)"]:
             view[col] = view[col].astype(float).round(1)
         st.dataframe(view, hide_index=True, use_container_width=True)
@@ -573,18 +590,38 @@ with tabs[1]:
                 st.write(f"Selected database item: **{r['food']}** (FatSecret food ID: {r['fdc_id']})")
                 serving = r.get("source_serving", {})
                 st.caption(f"Nutrition normalized from FatSecret serving: {serving.get('serving_description', '')} ({serving.get('metric_serving_amount', '?')} {serving.get('metric_serving_unit', '')}).")
-        if st.button("Save this meal to today's log", type="primary", use_container_width=True):
-            name = " + ".join(f"{r['grams_est']:g} g {r['food']}" for r in results)
+        st.markdown("#### What would you like to do?")
+        action_log, action_save = st.columns(2)
+        if action_log.button("1. Log meal", type="primary", use_container_width=True):
+            name = " + ".join(f"{r['input']} ({r['food']})" for r in results)
             with db() as conn:
                 conn.execute(
                     """INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, "FatSecret nutrition estimate; amounts entered in grams.", datetime.now().isoformat()),
+                    (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, "FatSecret nutrition estimate; household measures may be approximate.", datetime.now().isoformat()),
                 )
             st.session_state["nutrition_results"] = []
             st.session_state["nutrition_errors"] = []
-            st.success("Meal saved.")
+            st.success("Meal logged to your daily history.")
             st.rerun()
+        if action_save.button("2. Add to saved meals", use_container_width=True):
+            st.session_state["show_save_meal_form"] = True
+        if st.session_state.get("show_save_meal_form"):
+            with st.form("save_calculated_meal_form"):
+                saved_meal_name = st.text_input("Name this meal", placeholder="e.g., Green pea tacos")
+                save_to_library = st.form_submit_button("Save to Meals tab", type="primary", use_container_width=True)
+            if save_to_library:
+                if not saved_meal_name.strip():
+                    st.error("Enter a name for this meal.")
+                else:
+                    ingredients = [{"name": r["food"], "input": r["input"], "quantity": r["quantity"], "unit": r["unit"], "grams_est": r["grams_est"], "food_id": r["fdc_id"], "calories": r["calories"], "protein": r["protein"], "carbs": r["carbs"], "fat": r["fat"]} for r in results]
+                    with db() as conn:
+                        conn.execute("INSERT OR REPLACE INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?)", (saved_meal_name.strip(), json.dumps(ingredients), total_kcal, total_pro, total_carb, total_fat, datetime.now().isoformat()))
+                    st.session_state["show_save_meal_form"] = False
+                    st.session_state["nutrition_results"] = []
+                    st.session_state["nutrition_errors"] = []
+                    st.success(f"{saved_meal_name.strip()} saved in the Meals tab.")
+                    st.rerun()
     if errors:
         st.warning("Some items could not be calculated:")
         for error in errors:
@@ -592,7 +629,7 @@ with tabs[1]:
     st.caption("Nutrition is an estimate. Review the selected food match before saving; database entries can differ by preparation and brand.")
 
 # ---------- Weight ----------
-with tabs[2]:
+elif st.session_state["nav_section"] == "⚖️ Weight":
     st.subheader("Weight tracker")
     with st.form("weight_form", clear_on_submit=True):
         wd = st.date_input("Weigh-in date", value=date.today())
@@ -613,10 +650,36 @@ with tabs[2]:
     else: st.info("Your weigh-ins will appear here.")
 
 # ---------- Meal library ----------
-with tabs[3]:
+elif st.session_state["nav_section"] == "🍲 Meal library":
     st.subheader("Meal inspiration")
     st.write("Browse saved meal ideas. Values from older plans are historical; added recipes have estimated nutrition.")
+    with db() as conn:
+        custom_meals = pd.read_sql_query("SELECT * FROM saved_meals ORDER BY created_at DESC", conn)
+    st.markdown("### Your saved meals")
+    if custom_meals.empty:
+        st.caption("Meals you save after calculating nutrition will appear here, with their ingredient breakdown.")
+    else:
+        for _, saved_meal in custom_meals.iterrows():
+            with st.expander(f"{saved_meal['name']} · {float(saved_meal['calories']):.0f} kcal"):
+                try:
+                    saved_ingredients = json.loads(saved_meal['ingredients_json'])
+                except Exception:
+                    saved_ingredients = []
+                st.markdown("**Ingredients and quantities**")
+                for ingredient in saved_ingredients:
+                    st.write(f"• {ingredient.get('input', ingredient.get('name','Ingredient'))} — {float(ingredient.get('calories',0)):.0f} kcal")
+                st.markdown(f"**Macros:** Protein {float(saved_meal['protein']):.1f} g · Carbs {float(saved_meal['carbs']):.1f} g · Fat {float(saved_meal['fat']):.1f} g")
+                log_saved, delete_saved = st.columns(2)
+                if log_saved.button("Log this saved meal", key=f"log_saved_{saved_meal['id']}", use_container_width=True):
+                    with db() as conn:
+                        conn.execute("INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (today, datetime.now().strftime("%H:%M"), "Other", str(saved_meal['name']), 1, float(saved_meal['calories']), float(saved_meal['protein']), float(saved_meal['carbs']), float(saved_meal['fat']), "Saved meal; nutrition estimate from ingredient breakdown.", datetime.now().isoformat()))
+                    st.success("Saved meal logged."); st.rerun()
+                if delete_saved.button("Delete saved meal", key=f"delete_saved_{saved_meal['id']}", use_container_width=True):
+                    with db() as conn:
+                        conn.execute("DELETE FROM saved_meals WHERE id=?", (int(saved_meal['id']),))
+                    st.rerun()
     if not meals.empty:
+        st.markdown("### Meal ideas")
         c1,c2 = st.columns([2,1])
         search = c1.text_input("Search meals or ingredients")
         categories = ["All"] + sorted([str(x) for x in meals["category"].unique() if str(x)])
@@ -640,7 +703,7 @@ with tabs[3]:
         st.download_button("Download meal library CSV",data=meals.to_csv(index=False).encode(),file_name="meals.csv",mime="text/csv")
 
 # ---------- History ----------
-with tabs[4]:
+elif st.session_state["nav_section"] == "📈 History":
     st.subheader("History")
     if not food_df.empty:
         ff=food_df.copy(); ff["log_date"]=pd.to_datetime(ff["log_date"])
@@ -656,7 +719,7 @@ with tabs[4]:
     st.caption("Use trends over weeks, not a single weigh-in, to understand progress.")
 
 # ---------- Settings ----------
-with tabs[5]:
+elif st.session_state["nav_section"] == "⚙️ Settings":
     st.subheader("Settings & how it works")
     st.markdown("""
 ### Calorie target
