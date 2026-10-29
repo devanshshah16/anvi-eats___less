@@ -446,12 +446,6 @@ with main_tabs[0]:
             eta_col.metric("Estimated time to goal", "Not available")
             st.caption("Choose a non-maintenance goal approach and complete your profile to estimate the timeline.")
 
-    st.markdown("### Today's food")
-    if today_food.empty:
-        st.caption("Nothing logged yet. Use Quick log and just type what you ate.")
-    else:
-        st.dataframe(today_food[["log_time","meal_type","food_name","calories","protein","carbs","fat"]].rename(columns={"log_time":"Time","meal_type":"Meal","food_name":"Food","calories":"kcal","protein":"Protein (g)","carbs":"Carbs (g)","fat":"Fat (g)"}), hide_index=True, use_container_width=True)
-
 # ---------- Food & Meals: Quick log ----------
 with main_tabs[1]:
     st.subheader("Quick log")
@@ -652,6 +646,101 @@ with main_tabs[1]:
             st.write("• " + error)
     st.caption("Nutrition is an estimate. Review the selected food match before saving; database entries can differ by preparation and brand.")
 
+    st.markdown("### Today's food")
+    if today_food.empty:
+        st.caption("Nothing logged yet. Log food above and it will appear here.")
+    else:
+        st.dataframe(today_food[["log_time","meal_type","food_name","calories","protein","carbs","fat"]].rename(columns={"log_time":"Time","meal_type":"Meal","food_name":"Food","calories":"kcal","protein":"Protein (g)","carbs":"Carbs (g)","fat":"Fat (g)"}), hide_index=True, use_container_width=True)
+
+# ---------- Food & Meals: Meal library ----------
+# Saved meals and meal ideas are grouped with food logging.
+
+    st.subheader("Meal inspiration")
+    st.write("Browse saved meal ideas. Values from older plans are historical; added recipes have estimated nutrition.")
+    with db() as conn:
+        custom_meals = pd.read_sql_query("SELECT * FROM saved_meals ORDER BY created_at DESC", conn)
+    st.markdown("### Your saved meals")
+    if custom_meals.empty:
+        st.caption("Meals you save after calculating nutrition will appear here, with their ingredient breakdown.")
+    else:
+        for _, saved_meal in custom_meals.iterrows():
+            with st.expander(f"{saved_meal['name']} · {float(saved_meal['calories']):.0f} kcal"):
+                try:
+                    saved_ingredients = json.loads(saved_meal['ingredients_json'])
+                except Exception:
+                    saved_ingredients = []
+                st.markdown("**Ingredients and quantities**")
+                for ingredient in saved_ingredients:
+                    st.write(f"• {ingredient.get('input', ingredient.get('name','Ingredient'))} — {float(ingredient.get('calories',0)):.0f} kcal")
+                st.markdown(f"**Macros:** Protein {float(saved_meal['protein']):.1f} g · Carbs {float(saved_meal['carbs']):.1f} g · Fat {float(saved_meal['fat']):.1f} g")
+                log_saved, delete_saved = st.columns(2)
+                if log_saved.button("Log this saved meal", key=f"log_saved_{saved_meal['id']}", use_container_width=True):
+                    with db() as conn:
+                        conn.execute("INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (today, local_now().strftime("%H:%M"), "Other", str(saved_meal['name']), 1, float(saved_meal['calories']), float(saved_meal['protein']), float(saved_meal['carbs']), float(saved_meal['fat']), "Saved meal; nutrition estimate from ingredient breakdown.", local_now().isoformat()))
+                    st.success("Saved meal logged."); st.rerun()
+                if delete_saved.button("Delete saved meal", key=f"delete_saved_{saved_meal['id']}", use_container_width=True):
+                    with db() as conn:
+                        conn.execute("DELETE FROM saved_meals WHERE id=?", (int(saved_meal['id']),))
+                    st.rerun()
+    if not meals.empty:
+        st.markdown("### Meal ideas")
+        c1,c2 = st.columns([2,1])
+        search = c1.text_input("Search meals or ingredients")
+        categories = ["All"] + sorted([str(x) for x in meals["category"].unique() if str(x)])
+        category = c2.selectbox("Category",categories)
+        view = meals.copy()
+        if category != "All": view = view[view["category"]==category]
+        if search:
+            mask = view.astype(str).apply(lambda col: col.str.contains(search,case=False,na=False)).any(axis=1)
+            view=view[mask]
+        for _,r in view.iterrows():
+            with st.expander(f"{r['name']} · {r['calories']} kcal / serving"):
+                st.markdown(f"**Macros (estimate):** Protein {r['protein']} g · Carbs {r['carbs']} g · Fat {r['fat']} g")
+                st.markdown(f"**Ingredients:** {r['ingredients']}")
+                st.markdown(f"**Method:** {r['method']}")
+                st.caption(f"Source: {r['source']} | Tags: {r['tags']}")
+                if st.button("Log this meal",key=f"library_{r['name']}"):
+                    with db() as conn:
+                        conn.execute("""INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                        (today,local_now().strftime("%H:%M"),str(r["meal_type"]),str(r["name"]),1,float(r["calories"] or 0),float(r["protein"] or 0),float(r["carbs"] or 0),float(r["fat"] or 0),"Meal library estimate.",local_now().isoformat()))
+                    st.rerun()
+        st.download_button("Download meal library CSV",data=meals.to_csv(index=False).encode(),file_name="meals.csv",mime="text/csv")
+
+# ---------- Food & Meals: Nutrition & food history ----------
+# Daily nutrition and historical food reuse stay with food logging.
+
+    st.subheader("History")
+    if not food_df.empty:
+        ff=food_df.copy(); ff["log_date"]=pd.to_datetime(ff["log_date"])
+        daily=ff.groupby("log_date",as_index=False).agg(calories=("calories","sum"),protein=("protein","sum"),carbs=("carbs","sum"),fat=("fat","sum"),meals=("id","count"))
+        st.markdown("### Daily nutrition")
+        st.line_chart(daily.set_index("log_date")[["calories"]],y_label="kcal")
+        st.dataframe(daily.sort_values("log_date",ascending=False).round(1),hide_index=True,use_container_width=True)
+        st.download_button("Export food CSV",food_df.to_csv(index=False).encode(),file_name="food_log.csv",mime="text/csv")
+        st.markdown("### Reuse a previously logged food")
+        st.caption("Choose a past food log and save it to your Meal library for quick reuse. Nutrition values are copied from that historical entry.")
+        hist = food_df.copy().sort_values(["log_date", "log_time", "id"], ascending=False)
+        hist["_choice"] = hist.apply(lambda r: f"{r['log_date']} · {r.get('log_time','')} · {r['food_name']} ({float(r['calories'] or 0):.0f} kcal)", axis=1)
+        chosen_label = st.selectbox("Historical food item", hist["_choice"].tolist(), key="historical_food_choice")
+        chosen = hist[hist["_choice"] == chosen_label].iloc[0]
+        default_name = str(chosen["food_name"]).strip()
+        with st.form("save_historical_food_form"):
+            reuse_name = st.text_input("Name in Meal library", value=default_name)
+            st.caption(f"Copied nutrition: {float(chosen['calories'] or 0):.0f} kcal · Protein {float(chosen['protein'] or 0):.1f} g · Carbs {float(chosen['carbs'] or 0):.1f} g · Fat {float(chosen['fat'] or 0):.1f} g")
+            save_historical = st.form_submit_button("Save to Meal library", type="primary", use_container_width=True)
+        if save_historical:
+            if not reuse_name.strip():
+                st.error("Please enter a name for this saved item.")
+            else:
+                ingredient = [{"name": default_name, "input": f"Previously logged: {default_name}", "quantity": float(chosen.get("servings", 1) or 1), "unit": "serving", "grams_est": None, "food_id": None, "calories": float(chosen["calories"] or 0), "protein": float(chosen["protein"] or 0), "carbs": float(chosen["carbs"] or 0), "fat": float(chosen["fat"] or 0)}]
+                try:
+                    with db() as conn:
+                        conn.execute("INSERT INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET ingredients_json=excluded.ingredients_json, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, created_at=excluded.created_at", (reuse_name.strip(), json.dumps(ingredient), float(chosen["calories"] or 0), float(chosen["protein"] or 0), float(chosen["carbs"] or 0), float(chosen["fat"] or 0), local_now().isoformat()))
+                    st.success(f"{reuse_name.strip()} saved to the Meal library.")
+                except Exception as exc:
+                    st.error(f"Could not save this item: {exc}")
+    else: st.info("Meal history will appear as you log food.")
+
 # ---------- Weight & History: Weight tracker ----------
 with main_tabs[2]:
     st.subheader("Weight tracker")
@@ -711,94 +800,6 @@ with main_tabs[2]:
             st.info(f"No weigh-ins in the last {period_choice}.")
     else: st.info("Your weigh-ins will appear here.")
 
-# ---------- Food & Meals: Meal library ----------
-# This section shares the Food & Meals tab with Quick log.
-
-    st.subheader("Meal inspiration")
-    st.write("Browse saved meal ideas. Values from older plans are historical; added recipes have estimated nutrition.")
-    with db() as conn:
-        custom_meals = pd.read_sql_query("SELECT * FROM saved_meals ORDER BY created_at DESC", conn)
-    st.markdown("### Your saved meals")
-    if custom_meals.empty:
-        st.caption("Meals you save after calculating nutrition will appear here, with their ingredient breakdown.")
-    else:
-        for _, saved_meal in custom_meals.iterrows():
-            with st.expander(f"{saved_meal['name']} · {float(saved_meal['calories']):.0f} kcal"):
-                try:
-                    saved_ingredients = json.loads(saved_meal['ingredients_json'])
-                except Exception:
-                    saved_ingredients = []
-                st.markdown("**Ingredients and quantities**")
-                for ingredient in saved_ingredients:
-                    st.write(f"• {ingredient.get('input', ingredient.get('name','Ingredient'))} — {float(ingredient.get('calories',0)):.0f} kcal")
-                st.markdown(f"**Macros:** Protein {float(saved_meal['protein']):.1f} g · Carbs {float(saved_meal['carbs']):.1f} g · Fat {float(saved_meal['fat']):.1f} g")
-                log_saved, delete_saved = st.columns(2)
-                if log_saved.button("Log this saved meal", key=f"log_saved_{saved_meal['id']}", use_container_width=True):
-                    with db() as conn:
-                        conn.execute("INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (today, local_now().strftime("%H:%M"), "Other", str(saved_meal['name']), 1, float(saved_meal['calories']), float(saved_meal['protein']), float(saved_meal['carbs']), float(saved_meal['fat']), "Saved meal; nutrition estimate from ingredient breakdown.", local_now().isoformat()))
-                    st.success("Saved meal logged."); st.rerun()
-                if delete_saved.button("Delete saved meal", key=f"delete_saved_{saved_meal['id']}", use_container_width=True):
-                    with db() as conn:
-                        conn.execute("DELETE FROM saved_meals WHERE id=?", (int(saved_meal['id']),))
-                    st.rerun()
-    if not meals.empty:
-        st.markdown("### Meal ideas")
-        c1,c2 = st.columns([2,1])
-        search = c1.text_input("Search meals or ingredients")
-        categories = ["All"] + sorted([str(x) for x in meals["category"].unique() if str(x)])
-        category = c2.selectbox("Category",categories)
-        view = meals.copy()
-        if category != "All": view = view[view["category"]==category]
-        if search:
-            mask = view.astype(str).apply(lambda col: col.str.contains(search,case=False,na=False)).any(axis=1)
-            view=view[mask]
-        for _,r in view.iterrows():
-            with st.expander(f"{r['name']} · {r['calories']} kcal / serving"):
-                st.markdown(f"**Macros (estimate):** Protein {r['protein']} g · Carbs {r['carbs']} g · Fat {r['fat']} g")
-                st.markdown(f"**Ingredients:** {r['ingredients']}")
-                st.markdown(f"**Method:** {r['method']}")
-                st.caption(f"Source: {r['source']} | Tags: {r['tags']}")
-                if st.button("Log this meal",key=f"library_{r['name']}"):
-                    with db() as conn:
-                        conn.execute("""INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (today,local_now().strftime("%H:%M"),str(r["meal_type"]),str(r["name"]),1,float(r["calories"] or 0),float(r["protein"] or 0),float(r["carbs"] or 0),float(r["fat"] or 0),"Meal library estimate.",local_now().isoformat()))
-                    st.rerun()
-        st.download_button("Download meal library CSV",data=meals.to_csv(index=False).encode(),file_name="meals.csv",mime="text/csv")
-
-# ---------- Weight & History: History ----------
-# This section shares the Weight & History tab with the weight tracker.
-
-    st.subheader("History")
-    if not food_df.empty:
-        ff=food_df.copy(); ff["log_date"]=pd.to_datetime(ff["log_date"])
-        daily=ff.groupby("log_date",as_index=False).agg(calories=("calories","sum"),protein=("protein","sum"),carbs=("carbs","sum"),fat=("fat","sum"),meals=("id","count"))
-        st.markdown("### Daily nutrition")
-        st.line_chart(daily.set_index("log_date")[["calories"]],y_label="kcal")
-        st.dataframe(daily.sort_values("log_date",ascending=False).round(1),hide_index=True,use_container_width=True)
-        st.download_button("Export food CSV",food_df.to_csv(index=False).encode(),file_name="food_log.csv",mime="text/csv")
-        st.markdown("### Reuse a previously logged food")
-        st.caption("Choose a past food log and save it to your Meal library for quick reuse. Nutrition values are copied from that historical entry.")
-        hist = food_df.copy().sort_values(["log_date", "log_time", "id"], ascending=False)
-        hist["_choice"] = hist.apply(lambda r: f"{r['log_date']} · {r.get('log_time','')} · {r['food_name']} ({float(r['calories'] or 0):.0f} kcal)", axis=1)
-        chosen_label = st.selectbox("Historical food item", hist["_choice"].tolist(), key="historical_food_choice")
-        chosen = hist[hist["_choice"] == chosen_label].iloc[0]
-        default_name = str(chosen["food_name"]).strip()
-        with st.form("save_historical_food_form"):
-            reuse_name = st.text_input("Name in Meal library", value=default_name)
-            st.caption(f"Copied nutrition: {float(chosen['calories'] or 0):.0f} kcal · Protein {float(chosen['protein'] or 0):.1f} g · Carbs {float(chosen['carbs'] or 0):.1f} g · Fat {float(chosen['fat'] or 0):.1f} g")
-            save_historical = st.form_submit_button("Save to Meal library", type="primary", use_container_width=True)
-        if save_historical:
-            if not reuse_name.strip():
-                st.error("Please enter a name for this saved item.")
-            else:
-                ingredient = [{"name": default_name, "input": f"Previously logged: {default_name}", "quantity": float(chosen.get("servings", 1) or 1), "unit": "serving", "grams_est": None, "food_id": None, "calories": float(chosen["calories"] or 0), "protein": float(chosen["protein"] or 0), "carbs": float(chosen["carbs"] or 0), "fat": float(chosen["fat"] or 0)}]
-                try:
-                    with db() as conn:
-                        conn.execute("INSERT INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET ingredients_json=excluded.ingredients_json, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, created_at=excluded.created_at", (reuse_name.strip(), json.dumps(ingredient), float(chosen["calories"] or 0), float(chosen["protein"] or 0), float(chosen["carbs"] or 0), float(chosen["fat"] or 0), local_now().isoformat()))
-                    st.success(f"{reuse_name.strip()} saved to the Meal library.")
-                except Exception as exc:
-                    st.error(f"Could not save this item: {exc}")
-    else: st.info("Meal history will appear as you log food.")
     if not weight_df.empty:
         st.markdown("### Weight history")
         st.dataframe(weight_df.sort_values(["log_date","id"],ascending=False),hide_index=True,use_container_width=True)
