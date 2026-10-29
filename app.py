@@ -409,18 +409,13 @@ def goal_eta_days(current, goal, profile, tdee, target):
     if kg_week <= 0: return None
     return math.ceil(abs(current-float(goal))/kg_week*7)
 
-sections = ["🏠 Dashboard", "🍽️ Quick log", "⚖️ Weight", "🍲 Meal library", "📈 History", "⚙️ Settings"]
-if "nav_section" not in st.session_state:
-    st.session_state["nav_section"] = sections[0]
-st.radio("Navigate", sections, horizontal=True, key="nav_section", label_visibility="collapsed")
+# Four main pages. Related workflows are grouped together to reduce navigation.
+main_tabs = st.tabs(["🏠 Dashboard", "🍽️ Food & Meals", "⚖️ Weight & History", "⚙️ Settings"])
 
 # ---------- Dashboard ----------
-if st.session_state["nav_section"] == "🏠 Dashboard":
+with main_tabs[0]:
     st.subheader("Today's overview")
     st.caption(local_today().strftime("%A, %d %B %Y"))
-    quick_a, quick_b = st.columns(2)
-    quick_a.button("＋ Log a meal", type="primary", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "🍽️ Quick log"}))
-    quick_b.button("⚖️ Log current weight", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "⚖️ Weight"}))
     if target:
         remaining = target-today_cal
         a,b,c,d = st.columns(4)
@@ -457,8 +452,8 @@ if st.session_state["nav_section"] == "🏠 Dashboard":
     else:
         st.dataframe(today_food[["log_time","meal_type","food_name","calories","protein","carbs","fat"]].rename(columns={"log_time":"Time","meal_type":"Meal","food_name":"Food","calories":"kcal","protein":"Protein (g)","carbs":"Carbs (g)","fat":"Fat (g)"}), hide_index=True, use_container_width=True)
 
-# ---------- Quick log ----------
-elif st.session_state["nav_section"] == "🍽️ Quick log":
+# ---------- Food & Meals: Quick log ----------
+with main_tabs[1]:
     st.subheader("Quick log")
     st.write("Search each food, choose the closest FatSecret match, then select a quantity and measurement unit. Household conversions are estimates; use grams when possible.")
     if not fatsecret_token:
@@ -657,8 +652,8 @@ elif st.session_state["nav_section"] == "🍽️ Quick log":
             st.write("• " + error)
     st.caption("Nutrition is an estimate. Review the selected food match before saving; database entries can differ by preparation and brand.")
 
-# ---------- Weight ----------
-elif st.session_state["nav_section"] == "⚖️ Weight":
+# ---------- Weight & History: Weight tracker ----------
+with main_tabs[2]:
     st.subheader("Weight tracker")
     if current_weight is not None and profile["goal_weight"]:
         goal = float(profile["goal_weight"])
@@ -716,8 +711,9 @@ elif st.session_state["nav_section"] == "⚖️ Weight":
             st.info(f"No weigh-ins in the last {period_choice}.")
     else: st.info("Your weigh-ins will appear here.")
 
-# ---------- Meal library ----------
-elif st.session_state["nav_section"] == "🍲 Meal library":
+# ---------- Food & Meals: Meal library ----------
+# This section shares the Food & Meals tab with Quick log.
+
     st.subheader("Meal inspiration")
     st.write("Browse saved meal ideas. Values from older plans are historical; added recipes have estimated nutrition.")
     with db() as conn:
@@ -769,8 +765,9 @@ elif st.session_state["nav_section"] == "🍲 Meal library":
                     st.rerun()
         st.download_button("Download meal library CSV",data=meals.to_csv(index=False).encode(),file_name="meals.csv",mime="text/csv")
 
-# ---------- History ----------
-elif st.session_state["nav_section"] == "📈 History":
+# ---------- Weight & History: History ----------
+# This section shares the Weight & History tab with the weight tracker.
+
     st.subheader("History")
     if not food_df.empty:
         ff=food_df.copy(); ff["log_date"]=pd.to_datetime(ff["log_date"])
@@ -808,7 +805,7 @@ elif st.session_state["nav_section"] == "📈 History":
     st.caption("Use trends over weeks, not a single weigh-in, to understand progress.")
 
 # ---------- Settings ----------
-elif st.session_state["nav_section"] == "⚙️ Settings":
+with main_tabs[3]:
     st.subheader("Settings & how it works")
     st.markdown("### Time zone for all logging")
     st.write("Choose the time zone that should be used for default dates/times and new food, weight, and saved-meal timestamps. This is a setting for the app, not a change to your computer's clock.")
