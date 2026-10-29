@@ -5,6 +5,7 @@ import requests
 import os, re, math, json, base64
 from pathlib import Path
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo, available_timezones
 
 APP_DIR = Path(__file__).parent
 DB_PATH = APP_DIR / "funvi_diet.db"
@@ -46,13 +47,37 @@ def init_db():
             ingredients_json TEXT NOT NULL, calories REAL DEFAULT 0, protein REAL DEFAULT 0,
             carbs REAL DEFAULT 0, fat REAL DEFAULT 0, created_at TEXT
         );
+        CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT OR IGNORE INTO app_settings(key, value) VALUES ('timezone', 'America/Chicago');
         """)
         if not c.execute("SELECT id FROM profile WHERE id=1").fetchone():
-            c.execute("INSERT INTO profile(id, age, height_cm, goal_weight, activity, sex, goal_rate, created_at) VALUES(1, NULL, NULL, NULL, 'light', 'female', 'moderate', ?)", (datetime.now().isoformat(),))
+            c.execute("INSERT INTO profile(id, age, height_cm, goal_weight, activity, sex, goal_rate, created_at) VALUES(1, NULL, NULL, NULL, 'light', 'female', 'moderate', ?)", (local_now().isoformat(),))
 
 def get_profile():
     with db() as c:
         return dict(c.execute("SELECT * FROM profile WHERE id=1").fetchone())
+
+def get_setting(key, default=""):
+    with db() as c:
+        row = c.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+def save_setting(key, value):
+    with db() as c:
+        c.execute("INSERT INTO app_settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, str(value)))
+
+def app_timezone():
+    name = get_setting("timezone", "America/Chicago")
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        return ZoneInfo("America/Chicago")
+
+def local_now():
+    return datetime.now(app_timezone())
+
+def local_today():
+    return local_now().date()
 
 def save_profile(age, height, goal, activity, rate):
     with db() as c:
@@ -332,19 +357,24 @@ div.stButton > button[kind="primary"], div[data-testid="stFormSubmitButton"] but
 """, unsafe_allow_html=True)
 st.markdown('<div class="brand-wrap"><div class="brand">AnviEats <span>(...less)</span></div></div><div class="tagline">Eat well. Log less. Feel good. <b>— calories don\'t count if Anvi is judging the database. 😤</b></div>', unsafe_allow_html=True)
 
+def autosave_plan():
+    """Persist plan settings whenever a sidebar field changes."""
+    save_profile(
+        st.session_state["plan_age"],
+        st.session_state["plan_height"],
+        st.session_state["plan_goal_weight"],
+        st.session_state["plan_activity"],
+        st.session_state["plan_rate"],
+    )
+
 with st.sidebar:
     st.header("Your plan")
-    with st.form("profile_form"):
-        age = st.number_input("Age", min_value=18, max_value=100, value=int(profile["age"] or 26))
-        height = st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=float(profile["height_cm"] or 165), step=0.5)
-        goal_weight = st.number_input("Goal weight (kg)", min_value=30.0, max_value=250.0, value=float(profile["goal_weight"] or 60), step=0.5)
-        activity = st.selectbox("Usual activity", ["sedentary","light","moderate","very active"], index=["sedentary","light","moderate","very active"].index(profile["activity"]))
-        rate = st.selectbox("Goal approach", ["gentle","moderate","faster","maintenance"], index=["gentle","moderate","faster","maintenance"].index(profile["goal_rate"]))
-        saved = st.form_submit_button("Save plan", use_container_width=True)
-        if saved:
-            save_profile(age, height, goal_weight, activity, rate)
-            st.success("Plan saved.")
-            st.rerun()
+    st.caption("Changes save automatically.")
+    st.number_input("Age", min_value=18, max_value=100, value=int(profile["age"] or 26), key="plan_age", on_change=autosave_plan)
+    st.number_input("Height (cm)", min_value=120.0, max_value=220.0, value=float(profile["height_cm"] or 165), step=0.5, key="plan_height", on_change=autosave_plan)
+    st.number_input("Goal weight (kg)", min_value=30.0, max_value=250.0, value=float(profile["goal_weight"] or 60), step=0.5, key="plan_goal_weight", on_change=autosave_plan)
+    st.selectbox("Usual activity", ["sedentary","light","moderate","very active"], index=["sedentary","light","moderate","very active"].index(profile["activity"]), key="plan_activity", on_change=autosave_plan)
+    st.selectbox("Goal approach", ["gentle","moderate","faster","maintenance"], index=["gentle","moderate","faster","maintenance"].index(profile["goal_rate"]), key="plan_rate", on_change=autosave_plan)
     st.caption("Calorie and timeline figures are estimates, not medical advice.")
     with st.expander("Food database setup"):
         st.write("Nutrition lookups use FatSecret Platform API. Add your Client ID and Client Secret to `.streamlit/secrets.toml` (instructions in README).")
@@ -361,7 +391,7 @@ with db() as c:
     weight_df = pd.read_sql_query("SELECT * FROM weights ORDER BY log_date, id", c)
     food_df = pd.read_sql_query("SELECT * FROM food_logs ORDER BY log_date DESC, id DESC", c)
 
-today = date.today().isoformat()
+today = local_today().isoformat()
 today_food = food_df[food_df["log_date"] == today] if not food_df.empty else pd.DataFrame()
 today_cal = float(today_food["calories"].sum()) if not today_food.empty else 0
 today_pro = float(today_food["protein"].sum()) if not today_food.empty else 0
@@ -387,7 +417,7 @@ st.radio("Navigate", sections, horizontal=True, key="nav_section", label_visibil
 # ---------- Dashboard ----------
 if st.session_state["nav_section"] == "🏠 Dashboard":
     st.subheader("Today's overview")
-    st.caption(date.today().strftime("%A, %d %B %Y"))
+    st.caption(local_today().strftime("%A, %d %B %Y"))
     quick_a, quick_b = st.columns(2)
     quick_a.button("＋ Log a meal", type="primary", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "🍽️ Quick log"}))
     quick_b.button("⚖️ Log current weight", use_container_width=True, on_click=lambda: st.session_state.update({"nav_section": "⚖️ Weight"}))
@@ -404,45 +434,23 @@ if st.session_state["nav_section"] == "🏠 Dashboard":
         st.info("Log a weight and complete your profile to calculate a starting calorie estimate.")
         st.metric("Calories eaten today", f"{today_cal:,.0f} kcal")
 
-    if current_weight is not None and profile["goal_weight"]:
+    if profile["goal_weight"]:
         goal = float(profile["goal_weight"])
-        delta = current_weight-goal
-        eta = goal_eta_days(current_weight, goal, profile, tdee, target)
         st.markdown("### Your weight goal")
-        x,y,z = st.columns(3)
-        x.metric("Latest weight", f"{current_weight:.1f} kg")
-        y.metric("Goal weight", f"{goal:.1f} kg")
-        z.metric("Difference", f"{abs(delta):.1f} kg", delta="to lose" if delta>0 else ("to gain" if delta<0 else "goal reached"))
-        if eta == 0:
-            st.success("You're at your entered goal weight. Weight naturally fluctuates.")
+        goal_col, eta_col = st.columns(2)
+        goal_col.metric("Goal weight", f"{goal:.1f} kg")
+        eta = goal_eta_days(current_weight, goal, profile, tdee, target)
+        if current_weight is None:
+            eta_col.metric("Estimated time to goal", "—")
+            st.caption("Log your current weight in the Weight tab to estimate the timeline.")
+        elif eta == 0:
+            eta_col.metric("Estimated time to goal", "Goal reached")
         elif eta is not None:
-            st.metric("Estimated time to goal", f"~{eta} days", help="A rough projection from the selected calorie deficit, not a promise. Real weight change is nonlinear.")
-            if not weight_df.empty:
-                start_weight = float(weight_df.iloc[0]["weight"])
-                total_distance = abs(start_weight - goal)
-                remaining_distance = abs(current_weight - goal)
-                if total_distance > 0:
-                    progress = min(1.0, max(0.0, 1 - remaining_distance / total_distance))
-                    st.progress(progress)
-                    st.caption(f"{progress*100:.0f}% of the distance from your first logged weight to your goal has been covered. This can move up or down with normal fluctuations.")
-            st.caption("Timeline updates when your weight or plan changes. Focus on the trend, not a deadline.")
+            eta_col.metric("Estimated time to goal", f"~{eta} days", help="A rough projection based on your plan, not a promise. Actual weight change varies.")
         else:
-            st.info("Choose a weight-loss approach (rather than maintenance) and record a weight to estimate a timeline.")
-    st.markdown("### Weight trend")
-    periods = {"3 days":3, "1 week":7, "2 weeks":14, "1 month":30, "1 year":365}
-    period_choice = st.radio("Show", list(periods.keys()), horizontal=True, index=1, key="dashboard_weight_period")
-    cutoff = pd.Timestamp(date.today() - timedelta(days=periods[period_choice]-1))
-    if not weight_df.empty:
-        chart_df = weight_df.copy()
-        chart_df["log_date"] = pd.to_datetime(chart_df["log_date"], errors="coerce")
-        chart_df = chart_df[chart_df["log_date"] >= cutoff].sort_values(["log_date","id"])
-        if not chart_df.empty:
-            chart_df = chart_df.groupby("log_date", as_index=False)["weight"].last().set_index("log_date")
-            st.line_chart(chart_df["weight"], y_label="Weight (kg)")
-        else:
-            st.info(f"No weigh-ins in the last {period_choice}. Log a weight to start the chart.")
-    else:
-        st.info("Your weight chart will appear here after your first weigh-in.")
+            eta_col.metric("Estimated time to goal", "Not available")
+            st.caption("Choose a non-maintenance goal approach and complete your profile to estimate the timeline.")
+
     st.markdown("### Today's food")
     if today_food.empty:
         st.caption("Nothing logged yet. Use Quick log and just type what you ate.")
@@ -458,8 +466,8 @@ elif st.session_state["nav_section"] == "🍽️ Quick log":
         if fatsecret_error:
             st.error(f"FatSecret authentication error: {fatsecret_error}")
 
-    log_date = st.date_input("When did you eat it?", value=date.today(), key="quick_log_date")
-    log_time = st.time_input("Time", value=datetime.now().time().replace(second=0, microsecond=0), key="quick_log_time")
+    log_date = st.date_input("When did you eat it?", value=local_today(), key="quick_log_date")
+    log_time = st.time_input("Time", value=local_now().time().replace(tzinfo=None, second=0, microsecond=0), key="quick_log_time")
     meal_type = st.selectbox("Meal", ["Breakfast", "Mid-morning snack", "Lunch", "Afternoon snack", "Dinner", "Drink", "Other"], key="quick_meal_type")
 
     # Voice input remains optional: transcript can be used to seed food search terms.
@@ -619,7 +627,7 @@ elif st.session_state["nav_section"] == "🍽️ Quick log":
                 conn.execute(
                     """INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, "FatSecret nutrition estimate; household measures may be approximate.", datetime.now().isoformat()),
+                    (log_date.isoformat(), log_time.strftime("%H:%M"), meal_type, name, 1, total_kcal, total_pro, total_carb, total_fat, "FatSecret nutrition estimate; household measures may be approximate.", local_now().isoformat()),
                 )
             st.session_state["nutrition_results"] = []
             st.session_state["nutrition_errors"] = []
@@ -637,7 +645,7 @@ elif st.session_state["nav_section"] == "🍽️ Quick log":
                 else:
                     ingredients = [{"name": r["food"], "input": r["input"], "quantity": r["quantity"], "unit": r["unit"], "grams_est": r["grams_est"], "food_id": r["fdc_id"], "calories": r["calories"], "protein": r["protein"], "carbs": r["carbs"], "fat": r["fat"]} for r in results]
                     with db() as conn:
-                        conn.execute("INSERT OR REPLACE INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?)", (saved_meal_name.strip(), json.dumps(ingredients), total_kcal, total_pro, total_carb, total_fat, datetime.now().isoformat()))
+                        conn.execute("INSERT OR REPLACE INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?)", (saved_meal_name.strip(), json.dumps(ingredients), total_kcal, total_pro, total_carb, total_fat, local_now().isoformat()))
                     st.session_state["show_save_meal_form"] = False
                     st.session_state["nutrition_results"] = []
                     st.session_state["nutrition_errors"] = []
@@ -652,14 +660,40 @@ elif st.session_state["nav_section"] == "🍽️ Quick log":
 # ---------- Weight ----------
 elif st.session_state["nav_section"] == "⚖️ Weight":
     st.subheader("Weight tracker")
+    if current_weight is not None and profile["goal_weight"]:
+        goal = float(profile["goal_weight"])
+        delta = current_weight - goal
+        eta = goal_eta_days(current_weight, goal, profile, tdee, target)
+        st.markdown("### Your progress")
+        a, b, c = st.columns(3)
+        a.metric("Latest weight", f"{current_weight:.1f} kg")
+        b.metric("Goal weight", f"{goal:.1f} kg")
+        c.metric("Difference", f"{abs(delta):.1f} kg", delta="to lose" if delta > 0 else ("to gain" if delta < 0 else "goal reached"))
+        if eta == 0:
+            st.success("You're at your entered goal weight. Weight naturally fluctuates.")
+        elif eta is not None:
+            st.metric("Estimated time to goal", f"~{eta} days", help="A rough projection based on your plan, not a promise.")
+        else:
+            st.info("Estimated time to goal is unavailable with the current plan settings.")
+        if not weight_df.empty:
+            start_weight = float(weight_df.iloc[0]["weight"])
+            total_distance = abs(start_weight - goal)
+            remaining_distance = abs(current_weight - goal)
+            if total_distance > 0:
+                progress = min(1.0, max(0.0, 1 - remaining_distance / total_distance))
+                st.progress(progress)
+                st.caption(f"{progress*100:.0f}% of the distance from your first logged weight to your goal has been covered. Normal fluctuations can move this up or down.")
+    elif profile["goal_weight"]:
+        st.metric("Goal weight", f"{float(profile['goal_weight']):.1f} kg")
+        st.info("Log your first weigh-in below to see your latest weight, difference, and estimated timeline.")
     with st.form("weight_form", clear_on_submit=True):
-        wd = st.date_input("Weigh-in date", value=date.today())
+        wd = st.date_input("Weigh-in date", value=local_today())
         ww = st.number_input("Weight (kg)", min_value=25.0, max_value=300.0, value=float(current_weight or 60), step=0.1)
         wn = st.text_input("Note (optional)", placeholder="e.g., morning, before breakfast")
         add_weight = st.form_submit_button("Save weight", use_container_width=True)
         if add_weight:
             with db() as conn:
-                conn.execute("INSERT INTO weights(log_date,weight,note,created_at) VALUES(?,?,?,?)",(wd.isoformat(),ww,wn,datetime.now().isoformat()))
+                conn.execute("INSERT INTO weights(log_date,weight,note,created_at) VALUES(?,?,?,?)",(wd.isoformat(),ww,wn,local_now().isoformat()))
             st.success("Weight saved."); st.rerun()
     if not weight_df.empty:
         plot = weight_df.copy()
@@ -668,6 +702,18 @@ elif st.session_state["nav_section"] == "⚖️ Weight":
         st.line_chart(plot["weight"], y_label="Weight (kg)")
         st.dataframe(weight_df.sort_values(["log_date","id"],ascending=False)[["log_date","weight","note"]],hide_index=True,use_container_width=True)
         st.download_button("Export weight CSV",weight_df.to_csv(index=False).encode(),file_name="weight_log.csv",mime="text/csv")
+        st.markdown("### Weight trend")
+        periods = {"3 days":3, "1 week":7, "2 weeks":14, "1 month":30, "1 year":365}
+        period_choice = st.radio("Show", list(periods.keys()), horizontal=True, index=1, key="weight_tab_period")
+        cutoff = pd.Timestamp(local_today() - timedelta(days=periods[period_choice]-1))
+        chart_df = weight_df.copy()
+        chart_df["log_date"] = pd.to_datetime(chart_df["log_date"], errors="coerce")
+        chart_df = chart_df[chart_df["log_date"] >= cutoff].sort_values(["log_date","id"])
+        if not chart_df.empty:
+            chart_df = chart_df.groupby("log_date", as_index=False)["weight"].last().set_index("log_date")
+            st.line_chart(chart_df["weight"], y_label="Weight (kg)")
+        else:
+            st.info(f"No weigh-ins in the last {period_choice}.")
     else: st.info("Your weigh-ins will appear here.")
 
 # ---------- Meal library ----------
@@ -693,7 +739,7 @@ elif st.session_state["nav_section"] == "🍲 Meal library":
                 log_saved, delete_saved = st.columns(2)
                 if log_saved.button("Log this saved meal", key=f"log_saved_{saved_meal['id']}", use_container_width=True):
                     with db() as conn:
-                        conn.execute("INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (today, datetime.now().strftime("%H:%M"), "Other", str(saved_meal['name']), 1, float(saved_meal['calories']), float(saved_meal['protein']), float(saved_meal['carbs']), float(saved_meal['fat']), "Saved meal; nutrition estimate from ingredient breakdown.", datetime.now().isoformat()))
+                        conn.execute("INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (today, local_now().strftime("%H:%M"), "Other", str(saved_meal['name']), 1, float(saved_meal['calories']), float(saved_meal['protein']), float(saved_meal['carbs']), float(saved_meal['fat']), "Saved meal; nutrition estimate from ingredient breakdown.", local_now().isoformat()))
                     st.success("Saved meal logged."); st.rerun()
                 if delete_saved.button("Delete saved meal", key=f"delete_saved_{saved_meal['id']}", use_container_width=True):
                     with db() as conn:
@@ -719,7 +765,7 @@ elif st.session_state["nav_section"] == "🍲 Meal library":
                 if st.button("Log this meal",key=f"library_{r['name']}"):
                     with db() as conn:
                         conn.execute("""INSERT INTO food_logs(log_date,log_time,meal_type,food_name,servings,calories,protein,carbs,fat,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                        (today,datetime.now().strftime("%H:%M"),str(r["meal_type"]),str(r["name"]),1,float(r["calories"] or 0),float(r["protein"] or 0),float(r["carbs"] or 0),float(r["fat"] or 0),"Meal library estimate.",datetime.now().isoformat()))
+                        (today,local_now().strftime("%H:%M"),str(r["meal_type"]),str(r["name"]),1,float(r["calories"] or 0),float(r["protein"] or 0),float(r["carbs"] or 0),float(r["fat"] or 0),"Meal library estimate.",local_now().isoformat()))
                     st.rerun()
         st.download_button("Download meal library CSV",data=meals.to_csv(index=False).encode(),file_name="meals.csv",mime="text/csv")
 
@@ -733,6 +779,28 @@ elif st.session_state["nav_section"] == "📈 History":
         st.line_chart(daily.set_index("log_date")[["calories"]],y_label="kcal")
         st.dataframe(daily.sort_values("log_date",ascending=False).round(1),hide_index=True,use_container_width=True)
         st.download_button("Export food CSV",food_df.to_csv(index=False).encode(),file_name="food_log.csv",mime="text/csv")
+        st.markdown("### Reuse a previously logged food")
+        st.caption("Choose a past food log and save it to your Meal library for quick reuse. Nutrition values are copied from that historical entry.")
+        hist = food_df.copy().sort_values(["log_date", "log_time", "id"], ascending=False)
+        hist["_choice"] = hist.apply(lambda r: f"{r['log_date']} · {r.get('log_time','')} · {r['food_name']} ({float(r['calories'] or 0):.0f} kcal)", axis=1)
+        chosen_label = st.selectbox("Historical food item", hist["_choice"].tolist(), key="historical_food_choice")
+        chosen = hist[hist["_choice"] == chosen_label].iloc[0]
+        default_name = str(chosen["food_name"]).strip()
+        with st.form("save_historical_food_form"):
+            reuse_name = st.text_input("Name in Meal library", value=default_name)
+            st.caption(f"Copied nutrition: {float(chosen['calories'] or 0):.0f} kcal · Protein {float(chosen['protein'] or 0):.1f} g · Carbs {float(chosen['carbs'] or 0):.1f} g · Fat {float(chosen['fat'] or 0):.1f} g")
+            save_historical = st.form_submit_button("Save to Meal library", type="primary", use_container_width=True)
+        if save_historical:
+            if not reuse_name.strip():
+                st.error("Please enter a name for this saved item.")
+            else:
+                ingredient = [{"name": default_name, "input": f"Previously logged: {default_name}", "quantity": float(chosen.get("servings", 1) or 1), "unit": "serving", "grams_est": None, "food_id": None, "calories": float(chosen["calories"] or 0), "protein": float(chosen["protein"] or 0), "carbs": float(chosen["carbs"] or 0), "fat": float(chosen["fat"] or 0)}]
+                try:
+                    with db() as conn:
+                        conn.execute("INSERT INTO saved_meals(name,ingredients_json,calories,protein,carbs,fat,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET ingredients_json=excluded.ingredients_json, calories=excluded.calories, protein=excluded.protein, carbs=excluded.carbs, fat=excluded.fat, created_at=excluded.created_at", (reuse_name.strip(), json.dumps(ingredient), float(chosen["calories"] or 0), float(chosen["protein"] or 0), float(chosen["carbs"] or 0), float(chosen["fat"] or 0), local_now().isoformat()))
+                    st.success(f"{reuse_name.strip()} saved to the Meal library.")
+                except Exception as exc:
+                    st.error(f"Could not save this item: {exc}")
     else: st.info("Meal history will appear as you log food.")
     if not weight_df.empty:
         st.markdown("### Weight history")
@@ -742,6 +810,20 @@ elif st.session_state["nav_section"] == "📈 History":
 # ---------- Settings ----------
 elif st.session_state["nav_section"] == "⚙️ Settings":
     st.subheader("Settings & how it works")
+    st.markdown("### Time zone for all logging")
+    st.write("Choose the time zone that should be used for default dates/times and new food, weight, and saved-meal timestamps. This is a setting for the app, not a change to your computer's clock.")
+    timezone_options = ["America/Chicago", "America/New_York", "America/Los_Angeles", "America/Denver", "America/Toronto", "Europe/London", "Europe/Madrid", "Europe/Paris", "Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC"]
+    current_tz = get_setting("timezone", "America/Chicago")
+    if current_tz not in timezone_options:
+        timezone_options.append(current_tz)
+    with st.form("timezone_settings_form"):
+        selected_tz = st.selectbox("Time zone", timezone_options, index=timezone_options.index(current_tz), help="Select the time zone where logging should be based. Daylight-saving changes are handled automatically where applicable.")
+        save_timezone = st.form_submit_button("Save time zone", type="primary", use_container_width=True)
+    if save_timezone:
+        save_setting("timezone", selected_tz)
+        st.success(f"Time zone set to {selected_tz}. New default dates and times will use this time zone.")
+        st.rerun()
+    st.caption(f"Current app time: {local_now().strftime('%A, %d %B %Y · %H:%M')} ({get_setting('timezone', 'America/Chicago')})")
     st.markdown("""
 ### Calorie target
 BMR is estimated using the Mifflin–St Jeor equation for women, multiplied by an activity factor to estimate daily energy expenditure. The selected goal approach subtracts 250, 350 or 500 kcal/day, or zero for maintenance. The app has a 1,200 kcal/day lower guardrail, but that is not a guarantee this intake is appropriate for any individual.
