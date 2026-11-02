@@ -79,6 +79,28 @@ def local_now():
 def local_today():
     return local_now().date()
 
+def suggested_meal_type(moment=None):
+    """Suggest a meal category from the selected app-local time; user can override it."""
+    moment = moment or local_now()
+    hour = moment.hour
+    if 5 <= hour < 11:
+        return "Breakfast"
+    if 11 <= hour < 15:
+        return "Lunch"
+    if 15 <= hour < 17:
+        return "Afternoon snack"
+    if 17 <= hour < 22:
+        return "Dinner"
+    return "Other"
+
+def sync_meal_type_from_time():
+    """When the user changes the log time, refresh the suggested meal category."""
+    selected_time = st.session_state.get("quick_log_time")
+    if selected_time:
+        st.session_state["quick_meal_type"] = suggested_meal_type(
+            datetime.combine(local_today(), selected_time)
+        )
+
 def save_profile(age, height, goal, activity, rate):
     with db() as c:
         c.execute("UPDATE profile SET age=?, height_cm=?, goal_weight=?, activity=?, goal_rate=? WHERE id=1",
@@ -395,6 +417,8 @@ today = local_today().isoformat()
 today_food = food_df[food_df["log_date"] == today] if not food_df.empty else pd.DataFrame()
 today_cal = float(today_food["calories"].sum()) if not today_food.empty else 0
 today_pro = float(today_food["protein"].sum()) if not today_food.empty else 0
+today_carb = float(today_food["carbs"].sum()) if not today_food.empty else 0
+today_fat = float(today_food["fat"].sum()) if not today_food.empty else 0
 current_weight = float(weight_df.iloc[-1]["weight"]) if not weight_df.empty else None
 bmr, tdee, target = calories_target(profile, current_weight)
 
@@ -416,18 +440,46 @@ main_tabs = st.tabs(["🏠 Dashboard", "🍽️ Food & Meals", "⚖️ Weight & 
 with main_tabs[0]:
     st.subheader("Today's overview")
     st.caption(local_today().strftime("%A, %d %B %Y"))
+
+    # Food tracking is independent of the weight/profile setup.
+    st.markdown("### Daily nutrition")
     if target:
-        remaining = target-today_cal
-        a,b,c,d = st.columns(4)
-        a.metric("Daily calorie target", f"{target:,} kcal")
+        remaining = target - today_cal
+        a, b, c, d, e = st.columns(5)
+        a.metric("Calorie target", f"{target:,} kcal")
         b.metric("Calories eaten", f"{today_cal:,.0f} kcal")
-        c.metric("Calories left", f"{max(0,remaining):,.0f} kcal")
-        d.metric("Protein logged", f"{today_pro:.1f} g")
-        st.progress(min(1.0,today_cal/target))
-        st.caption(f"{today_cal/target*100:.0f}% of daily target logged")
+        c.metric("Calories left", f"{max(0, remaining):,.0f} kcal")
+        d.metric("Protein", f"{today_pro:.1f} g")
+        e.metric("Carbs", f"{today_carb:.1f} g")
+        st.progress(min(1.0, today_cal / target))
+        st.caption(f"{today_cal / target * 100:.0f}% of daily calorie target logged")
     else:
-        st.info("Log a weight and complete your profile to calculate a starting calorie estimate.")
-        st.metric("Calories eaten today", f"{today_cal:,.0f} kcal")
+        a, b, c, d = st.columns(4)
+        a.metric("Calories eaten", f"{today_cal:,.0f} kcal")
+        b.metric("Protein", f"{today_pro:.1f} g")
+        c.metric("Carbs", f"{today_carb:.1f} g")
+        d.metric("Fat", f"{today_fat:.1f} g")
+        st.info("Your food log is working. Complete the profile and record a weight in Settings / Weight & History to calculate a personalized calorie target.")
+
+    # Always show every macro, even when a calorie target cannot yet be calculated.
+    if target:
+        macro_cols = st.columns(3)
+        macro_cols[0].metric("Protein", f"{today_pro:.1f} g")
+        macro_cols[1].metric("Carbs", f"{today_carb:.1f} g")
+        macro_cols[2].metric("Fat", f"{today_fat:.1f} g")
+
+    st.markdown("### Today's food")
+    if today_food.empty:
+        st.caption("No food logged yet today. Open Food & Meals to add your first entry.")
+    else:
+        today_view = today_food.copy()
+        cols = [c for c in ["log_time", "meal_type", "food_name", "calories", "protein", "carbs", "fat"] if c in today_view.columns]
+        today_view = today_view[cols].rename(columns={
+            "log_time": "Time", "meal_type": "Meal", "food_name": "Food",
+            "calories": "kcal", "protein": "Protein (g)", "carbs": "Carbs (g)", "fat": "Fat (g)"
+        })
+        st.dataframe(today_view, hide_index=True, use_container_width=True)
+        st.caption(f"{len(today_food)} food log entr{'y' if len(today_food) == 1 else 'ies'} today.")
 
     if profile["goal_weight"]:
         goal = float(profile["goal_weight"])
@@ -437,17 +489,23 @@ with main_tabs[0]:
         eta = goal_eta_days(current_weight, goal, profile, tdee, target)
         if current_weight is None:
             eta_col.metric("Estimated time to goal", "—")
-            st.caption("Log your current weight in the Weight tab to estimate the timeline.")
+            st.caption("Record a weigh-in in Weight & History to estimate the timeline.")
         elif eta == 0:
             eta_col.metric("Estimated time to goal", "Goal reached")
         elif eta is not None:
             eta_col.metric("Estimated time to goal", f"~{eta} days", help="A rough projection based on your plan, not a promise. Actual weight change varies.")
         else:
             eta_col.metric("Estimated time to goal", "Not available")
-            st.caption("Choose a non-maintenance goal approach and complete your profile to estimate the timeline.")
+            st.caption("Choose a non-maintenance goal approach to estimate a timeline.")
 
 # ---------- Food & Meals: Quick log ----------
 with main_tabs[1]:
+    # Fresh defaults on a new session; after a successful log they are refreshed again.
+    _log_now = local_now()
+    st.session_state.setdefault("quick_log_date", _log_now.date())
+    st.session_state.setdefault("quick_log_time", _log_now.time().replace(tzinfo=None, second=0, microsecond=0))
+    st.session_state.setdefault("quick_meal_type", suggested_meal_type(_log_now))
+
     st.subheader("Quick log")
     st.write("Search each food, choose the closest FatSecret match, then select a quantity and measurement unit. Household conversions are estimates; use grams when possible.")
     if not fatsecret_token:
@@ -455,19 +513,17 @@ with main_tabs[1]:
         if fatsecret_error:
             st.error(f"FatSecret authentication error: {fatsecret_error}")
 
-    log_date = st.date_input("When did you eat it?", value=local_today(), key="quick_log_date")
-    log_time = st.time_input("Time", value=local_now().time().replace(tzinfo=None, second=0, microsecond=0), key="quick_log_time")
-    meal_type = st.selectbox("Meal", ["Breakfast", "Mid-morning snack", "Lunch", "Afternoon snack", "Dinner", "Drink", "Other"], key="quick_meal_type")
-
-    # Voice input remains optional: transcript can be used to seed food search terms.
-    try:
-        from streamlit_mic_recorder import speech_to_text
-        spoken = speech_to_text(language="en", start_prompt="🎙️ Speak your meal", stop_prompt="⏹️ Stop", just_once=True, use_container_width=True, key="anvi_speech")
-        if spoken:
-            st.session_state["voice_food_text"] = spoken
-            st.info("Voice captured. You can copy individual food names into the rows below and choose the correct database match.")
-    except Exception:
-        st.caption("Voice input is optional. You can type food names directly below.")
+    st.markdown("#### When did you eat?")
+    st.caption("Date, time, and meal type are pre-filled using the app's saved time zone. You can change any of them before logging.")
+    time_col, date_col, meal_col = st.columns([1.1, 1.1, 1.4])
+    log_date = date_col.date_input("Date", key="quick_log_date")
+    log_time = time_col.time_input("Time", key="quick_log_time", on_change=sync_meal_type_from_time)
+    meal_options = ["Breakfast", "Mid-morning snack", "Lunch", "Afternoon snack", "Dinner", "Drink", "Other"]
+    _suggested = suggested_meal_type(datetime.combine(log_date, log_time))
+    # Keep the user's current selection unless they have not selected one yet.
+    if st.session_state.get("quick_meal_type") not in meal_options:
+        st.session_state["quick_meal_type"] = _suggested
+    meal_type = meal_col.selectbox("Meal type", meal_options, key="quick_meal_type")
 
     if "food_row_count" not in st.session_state:
         st.session_state["food_row_count"] = 1
@@ -620,6 +676,10 @@ with main_tabs[1]:
                 )
             st.session_state["nutrition_results"] = []
             st.session_state["nutrition_errors"] = []
+            _next_log_now = local_now()
+            st.session_state["quick_log_date"] = _next_log_now.date()
+            st.session_state["quick_log_time"] = _next_log_now.time().replace(tzinfo=None, second=0, microsecond=0)
+            st.session_state["quick_meal_type"] = suggested_meal_type(_next_log_now)
             st.success("Meal logged to your daily history.")
             st.rerun()
         if action_save.button("2. Add to saved meals", use_container_width=True):
@@ -808,6 +868,7 @@ with main_tabs[2]:
 # ---------- Settings ----------
 with main_tabs[3]:
     st.subheader("Settings & how it works")
+    st.info("Your profile, time-zone preference, food logs, weight logs, and saved meals are stored in the app database. On Streamlit Community Cloud, the local SQLite file is not guaranteed to survive app rebuilds or instance replacement. For guaranteed long-term retention across redeployments, connect a persistent database (for example, Supabase) and keep regular backups.")
     st.markdown("### Time zone for all logging")
     st.write("Choose the time zone that should be used for default dates/times and new food, weight, and saved-meal timestamps. This is a setting for the app, not a change to your computer's clock.")
     timezone_options = ["America/Chicago", "America/New_York", "America/Los_Angeles", "America/Denver", "America/Toronto", "Europe/London", "Europe/Madrid", "Europe/Paris", "Asia/Kolkata", "Asia/Dubai", "Asia/Singapore", "Asia/Tokyo", "Australia/Sydney", "UTC"]
@@ -819,6 +880,10 @@ with main_tabs[3]:
         save_timezone = st.form_submit_button("Save time zone", type="primary", use_container_width=True)
     if save_timezone:
         save_setting("timezone", selected_tz)
+        _new_zone_now = datetime.now(ZoneInfo(selected_tz))
+        st.session_state["quick_log_date"] = _new_zone_now.date()
+        st.session_state["quick_log_time"] = _new_zone_now.time().replace(tzinfo=None, second=0, microsecond=0)
+        st.session_state["quick_meal_type"] = suggested_meal_type(_new_zone_now)
         st.success(f"Time zone set to {selected_tz}. New default dates and times will use this time zone.")
         st.rerun()
     st.caption(f"Current app time: {local_now().strftime('%A, %d %B %Y · %H:%M')} ({get_setting('timezone', 'America/Chicago')})")
